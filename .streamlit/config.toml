@@ -1,0 +1,10 @@
+# Streamlit 配置
+# 若在 Cursor 远程/端口转发下无法访问，此配置让服务监听所有网卡
+[server]
+address = "0.0.0.0"
+port = 8501
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
