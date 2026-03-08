@@ -5,19 +5,172 @@ F1 双车手排位赛最快圈对比动画模块。
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import List, Tuple
 
 import fastf1
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from matplotlib.patches import Wedge, Polygon
 import numpy as np
 import pandas as pd
 from matplotlib.animation import FuncAnimation, PillowWriter
+from PIL import Image
 
 
 DRIVER_COLORS = ["#00d4ff", "#e63946"]
 MARKER_OFFSET = 25  # 两车垂直偏移（1/10m），避免重叠
+CAR_MARKER_SCALE = 1.6  # 车手箭头缩放，增大可视性
+TEAM_LOGO_DIR = Path(__file__).resolve().parent / "assets" / "team_logos"
+
+# FastF1 TeamName (2018-2025) -> theme color
+TEAM_THEME_COLORS = {
+    "Ferrari": "#DC0000",
+    "Mercedes": "#00D2BE",
+    "Red Bull Racing": "#1E41FF",
+    "McLaren": "#FF8700",
+    "Williams": "#005AFF",
+    "Haas F1 Team": "#B6BABD",
+    "Aston Martin": "#006F62",
+    "Alpine": "#0090FF",
+    "Racing Point": "#F596C8",
+    "Force India": "#F596C8",
+    "Renault": "#FFF500",
+    "Toro Rosso": "#2B4562",
+    "AlphaTauri": "#2B4562",
+    "RB": "#6692FF",
+    "Racing Bulls": "#6692FF",
+    "Sauber": "#9B0000",
+    "Alfa Romeo Racing": "#900000",
+    "Alfa Romeo": "#900000",
+    "Kick Sauber": "#52E252",
+}
+
+TEAM_BADGE_LABELS = {
+    "Ferrari": "FER",
+    "Mercedes": "MER",
+    "Red Bull Racing": "RBR",
+    "McLaren": "MCL",
+    "Williams": "WIL",
+    "Haas F1 Team": "HAA",
+    "Aston Martin": "AMR",
+    "Alpine": "ALP",
+    "Racing Point": "RPT",
+    "Force India": "FIN",
+    "Renault": "REN",
+    "Toro Rosso": "TRR",
+    "AlphaTauri": "ATR",
+    "RB": "RB",
+    "Racing Bulls": "RBU",
+    "Sauber": "SAU",
+    "Alfa Romeo Racing": "ARR",
+    "Alfa Romeo": "ARO",
+    "Kick Sauber": "KSA",
+}
+
+TEAM_LOGO_FILES = {
+    "Ferrari": "ferrari",
+    "Mercedes": "mercedes",
+    "Red Bull Racing": "red-bull-racing",
+    "McLaren": "mclaren",
+    "Williams": "williams",
+    "Haas F1 Team": "haas-f1-team",
+    "Aston Martin": "aston-martin",
+    "Alpine": "alpine",
+    "Racing Point": "racing-point",
+    "Force India": "force-india",
+    "Renault": "renault",
+    "Toro Rosso": "toro-rosso",
+    "AlphaTauri": "alphatauri",
+    "RB": "rb",
+    "Racing Bulls": "racing-bulls",
+    "Sauber": "sauber",
+    "Alfa Romeo Racing": "alfa-romeo-racing",
+    "Alfa Romeo": "alfa-romeo",
+    "Kick Sauber": "kick-sauber",
+}
+
+_TEAM_LOGO_CACHE: dict[str, np.ndarray | None] = {}
+
+
+def _team_color(team_name: str | None, fallback: str) -> str:
+    """Return mapped team theme color with fallback."""
+    if not team_name:
+        return fallback
+    return TEAM_THEME_COLORS.get(str(team_name).strip(), fallback)
+
+
+def _same_hue_variant(base_color: str) -> str:
+    """Generate a distinguishable lighter/darker variant of the same hue."""
+    rgb = np.array(mcolors.to_rgb(base_color), dtype=float)
+    luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    # Dark colors -> lighten, bright colors -> darken.
+    if luminance < 0.52:
+        out = rgb + (1.0 - rgb) * 0.38
+    else:
+        out = rgb * 0.68
+    return mcolors.to_hex(np.clip(out, 0.0, 1.0))
+
+
+def _team_badge_label(team_name: str | None) -> str:
+    """Return compact team badge text shown before driver code."""
+    if not team_name:
+        return "TEAM"
+    name = str(team_name).strip()
+    return TEAM_BADGE_LABELS.get(name, name[:3].upper())
+
+
+def _resolve_team_logo_path(team_name: str | None) -> Path | None:
+    """Resolve team logo file path from assets/team_logos."""
+    if not team_name:
+        return None
+    team = str(team_name).strip()
+    stem = TEAM_LOGO_FILES.get(team)
+    if not stem:
+        return None
+    for ext in (".png", ".svg", ".jpg", ".jpeg", ".webp"):
+        path = TEAM_LOGO_DIR / f"{stem}{ext}"
+        if path.exists():
+            return path
+    return None
+
+
+def _load_team_logo(team_name: str | None) -> np.ndarray | None:
+    """Load team logo image array from png/svg with cache."""
+    key = str(team_name).strip() if team_name else ""
+    if key in _TEAM_LOGO_CACHE:
+        return _TEAM_LOGO_CACHE[key]
+
+    path = _resolve_team_logo_path(team_name)
+    if path is None:
+        _TEAM_LOGO_CACHE[key] = None
+        return None
+
+    img: np.ndarray | None = None
+    try:
+        suffix = path.suffix.lower()
+        if suffix == ".png":
+            img = plt.imread(path)
+        elif suffix == ".svg":
+            # Optional dependency: cairosvg is needed to rasterize SVG.
+            try:
+                import cairosvg  # type: ignore
+            except Exception:
+                img = None
+            else:
+                png_bytes = cairosvg.svg2png(url=str(path))
+                pil_img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+                img = np.asarray(pil_img)
+        elif suffix in {".jpg", ".jpeg", ".webp"}:
+            pil_img = Image.open(path).convert("RGBA")
+            img = np.asarray(pil_img)
+    except Exception:
+        img = None
+
+    _TEAM_LOGO_CACHE[key] = img
+    return img
 
 
 def _fmt_td(val) -> str:
@@ -304,7 +457,20 @@ def run_comparison_animation(
         row_idx = fastest_in_phase.name
         lap = sess.laps.loc[row_idx]
         tel = _prepare_driver_lap_data(lap)
-        laps_data.append({"lap": fastest_in_phase, "tel": tel, "driver": drv, "color": DRIVER_COLORS[i]})
+        team_name = lap.get("Team")
+        color = _team_color(team_name, DRIVER_COLORS[i])
+        laps_data.append({
+            "lap": fastest_in_phase,
+            "tel": tel,
+            "driver": drv,
+            "team": team_name,
+            "color": color,
+        })
+    if (
+        len(laps_data) == 2
+        and str(laps_data[0]["color"]).lower() == str(laps_data[1]["color"]).lower()
+    ):
+        laps_data[1]["color"] = _same_hue_variant(laps_data[1]["color"])
 
     # 根据圈时长确定帧数：约 40 帧/秒，保证轨迹连续不跳跃
     valid_durations = [
@@ -367,6 +533,7 @@ def run_comparison_animation(
             "lap_elapsed": float(time_rel[-1]),
             "lap": ld["lap"],
             "driver": ld["driver"],
+            "team": ld.get("team"),
             "color": ld["color"],
         })
 
@@ -405,7 +572,7 @@ def run_comparison_animation(
             ax.text(px, py, f" {lbl}", color="white", fontsize=8, fontweight="bold", zorder=21)
 
     markers = []
-    car_local = np.array([[45, 0], [-35, 14], [-25, 0], [-35, -14]])
+    car_local = CAR_MARKER_SCALE * np.array([[45, 0], [-35, 14], [-25, 0], [-35, -14]])
 
     for dc in driver_curves:
         # 箭头标记使用车手代表色（车体+描边）
@@ -428,8 +595,47 @@ def run_comparison_animation(
 
     legend_y = 0.98
     for dc in driver_curves:
-        ax.text(0.02, legend_y, f"■ {dc['driver']}", color=dc["color"], fontsize=11,
-                transform=ax.transAxes, va="top")
+        logo_img = _load_team_logo(dc.get("team"))
+        if logo_img is not None:
+            logo_box = OffsetImage(logo_img, zoom=0.085)
+            logo_ab = AnnotationBbox(
+                logo_box,
+                (0.042, legend_y - 0.012),
+                xycoords="axes fraction",
+                frameon=False,
+                box_alignment=(0.5, 0.5),
+                zorder=40,
+            )
+            ax.add_artist(logo_ab)
+        else:
+            badge = _team_badge_label(dc.get("team"))
+            ax.text(
+                0.02,
+                legend_y,
+                f" {badge} ",
+                color="white",
+                fontsize=8,
+                fontweight="bold",
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                bbox=dict(
+                    boxstyle="round,pad=0.18,rounding_size=0.15",
+                    facecolor=dc["color"],
+                    edgecolor="#222222",
+                    linewidth=0.9,
+                ),
+            )
+        ax.text(
+            0.085,
+            legend_y,
+            dc["driver"],
+            color=dc["color"],
+            fontsize=11,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+        )
         legend_y -= 0.04
 
     # 右上角分段时间：仅在对应车手完成该分段后显示
