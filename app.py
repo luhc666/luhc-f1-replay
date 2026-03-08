@@ -9,6 +9,7 @@ from pathlib import Path
 
 import streamlit as st
 import fastf1
+import pandas as pd
 
 st.set_page_config(page_title="F1 最快圈对比", page_icon="🏎️", layout="centered")
 
@@ -32,7 +33,7 @@ def get_event_schedule(year: int):
 
 @st.cache_data(ttl=3600)
 def get_session_drivers(year: int, gp: str, qualifying_phase: str):
-    """按排位赛阶段筛选：Q1 全员，Q2 仅晋级车手，Q3 仅晋级车手。"""
+    """返回当前 Q 的排名与车手列表（均按该 Q 最快圈排序）。"""
     try:
         fastf1.Cache.enable_cache(str(CACHE_DIR))
         sess = fastf1.get_session(year, gp, "Q")
@@ -45,13 +46,41 @@ def get_session_drivers(year: int, gp: str, qualifying_phase: str):
         q1, q2, q3 = sess.laps.split_qualifying_sessions()
         phase_laps = {"Q1": q1, "Q2": q2, "Q3": q3}.get(phase)
         if phase_laps is None or phase_laps.empty:
-            return []
+            return [], []
+
         col = "Abbreviation" if "Abbreviation" in phase_laps.columns else "Driver"
-        drivers = phase_laps[col].dropna().unique().tolist()
-        return sorted(set(str(d).strip().upper() for d in drivers))
+        raw_driver = phase_laps[col]
+        normalized_driver = raw_driver.fillna("").astype(str).str.strip().str.upper()
+        driver_codes = sorted(set(d for d in normalized_driver.tolist() if d))
+
+        ranking_raw = []
+        for driver in driver_codes:
+            driver_laps = phase_laps[normalized_driver == driver]
+            if driver_laps.empty:
+                continue
+            fastest_lap = driver_laps.pick_fastest()
+            lap_time = fastest_lap.get("LapTime") if fastest_lap is not None else pd.NaT
+            ranking_raw.append({"driver": driver, "lap_time": lap_time})
+
+        ranking_raw.sort(key=lambda r: (pd.isna(r["lap_time"]), r["lap_time"]))
+
+        ranking = []
+        for i, item in enumerate(ranking_raw, start=1):
+            lap_time = item["lap_time"]
+            if pd.isna(lap_time):
+                lap_time_text = "N/A"
+            else:
+                total_seconds = lap_time.total_seconds()
+                minutes = int(total_seconds // 60)
+                seconds = total_seconds - minutes * 60
+                lap_time_text = f"{minutes}:{seconds:06.3f}"
+            ranking.append({"排名": i, "车手": item["driver"], "最快圈": lap_time_text})
+
+        drivers_sorted = [r["车手"] for r in ranking]
+        return drivers_sorted, ranking
     except Exception as e:
         st.error(f"加载排位赛数据失败: {e}")
-        return []
+        return [], []
 
 
 QUALIFYING_PHASES = {"Q1": "Q1", "Q2": "Q2", "Q3": "Q3"}
@@ -87,9 +116,10 @@ with col3:
     )
 
 if gp and events:
-    drivers_available = get_session_drivers(year, gp, session_key)
+    drivers_available, ranking_rows = get_session_drivers(year, gp, session_key)
 else:
     drivers_available = []
+    ranking_rows = []
 
 if drivers_available:
     selected = st.multiselect(
@@ -101,6 +131,10 @@ if drivers_available:
 else:
     selected = []
     st.info("请先选择年份、分站和排位赛阶段以加载车手列表")
+
+if ranking_rows:
+    st.markdown(f"### {session_key} 当前排名")
+    st.dataframe(pd.DataFrame(ranking_rows), use_container_width=True, hide_index=True)
 
 if st.button("生成对比动画", type="primary", use_container_width=True):
     if not selected:

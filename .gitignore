@@ -1,3 +1,5 @@
 .fastf1_cache/
 .venv/
 __pycache__/
+.idea/
+*.iml
